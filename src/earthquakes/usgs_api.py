@@ -2,6 +2,8 @@
 import urllib
 import pandas as pd 
 import datetime
+import asyncio
+import aiohttp
 import io
 
 # --- CONSTANT DEFINITIONS ---
@@ -133,4 +135,64 @@ def get_earthquake_data(latitude, longitude, radius, minimum_magnitude=None, end
     #Parse the response to a DataFrame
     data = pd.read_table(response, delimiter = ',')
 
+    return data
+
+async def get_earthquake_data_for_multiple_locations(assets, radius, minimum_magnitude=None, end_date=None):
+    """This function retrieves a dataframe of all earthquakes in multiple circles of interest of a common radius, and matching the additional criteria, from the USGS API.
+    This function uses coroutines to perform one query per circle. 
+
+    Parameters
+    ---------- 
+        
+    Returns
+    -------
+        DataFrame
+            DataFrame with one earthquake matching the criteria per row, containing all data available from the USGS API.
+    """
+    async with aiohttp.ClientSession() as session:
+        tasks = [asyncio.ensure_future( \
+                get_earthquake_data_for_single_location(session, location[ASSET_LATITUDE_COLUMN], location[ASSET_LONGITUDE_COLUMN], radius, minimum_magnitude, end_date) \
+            ) for index, location in assets.iterrows()]
+        responses = await asyncio.gather(*tasks) #Wait for all coroutines to end and gather results.
+
+        #Gathered results must be merged within the same DataFrame
+        data_unit_list = [] #List of all unit dataframes
+        for response in responses:
+            data_unit = pd.read_csv(io.StringIO(response)) #Convert the response to a dataframe
+            data_unit_list.append(data_unit) #Store it in the list
+        data = pd.concat(data_unit_list) #Merge all unit dataframe into a single one
+    return data
+
+async def get_earthquake_data_for_single_location(session, latitude, longitude, radius, minimum_magnitude, end_date):
+    """This function handles a coroutine to perform one call to USGS API. 
+    It retrieves a text-csv string of all earthquakes in a circle of interest, and matching the additional criteria, from the USGS API. 
+
+    Parameters
+    ---------- 
+        session: aiohttp.ClientSession
+        latitude: float
+            latitude of the center of the circle, in decimal degrees
+        longitude: float
+            longitude of the center of the circle, in decimal degrees
+        radius: float
+            radius of the circle, in km
+        minimum_magnitude: float, optional
+            When set, this allows to filter out earthquakes of a magnitude strictly lower than this value
+        end_date: float, optional
+            When set, this allows to filter out earthquakes that happened after the specified date. ISO8601 Date/Time format. Unless a timezone is specified, UTC is assumed (see API documentation)
+    
+    Returns
+    -------
+        str
+            String in text-csv format with one earthquake matching the criteria per row, containing all data available from the USGS API.
+    """
+
+    #Build the URL to perform a query operation
+    parameters = build_api_query_parameters(latitude, longitude, radius, minimum_magnitude, end_date,USGS_API_PARAM_FORMAT_CSV)
+    url = build_api_url(USGS_API_METHOD_QUERY, parameters)
+
+    #Perform the API Call and retrieve the response
+    async with session.get(url) as response:
+        assert response.status == HTTPCODE_OK #Ensure the call is successful
+        data = await response.text()
     return data
