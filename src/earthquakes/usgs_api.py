@@ -160,7 +160,7 @@ async def get_earthquake_data_for_multiple_locations(assets, radius, minimum_mag
         for response in responses:
             data_unit = pd.read_csv(io.StringIO(response)) #Convert the response to a dataframe
             data_unit_list.append(data_unit) #Store it in the list
-        data = pd.concat(data_unit_list) #Merge all unit dataframe into a single one
+        data = pd.concat(data_unit_list).drop_duplicates() #Merge all unit dataframe into a single one
     return data
 
 async def get_earthquake_data_for_single_location(session, latitude, longitude, radius, minimum_magnitude, end_date):
