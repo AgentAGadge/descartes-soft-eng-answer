@@ -1,6 +1,8 @@
 # --- IMPORTS --- 
 import math
 import datetime 
+import numpy as np
+import pandas as pd
 
 # --- CONSTANT DEFINITIONS ---
 EARTH_RADIUS = 6378
@@ -13,11 +15,7 @@ MAGNITUDE_COLUMN = "mag"
 DISTANCE_COLUMN = "distance"
 LATITUDE_COLUMN = "latitude"
 LONGITUDE_COLUMN = "longitude"
-
-# EARTHQUAKE EVENT DATA MODEL DEFINITION
-EARTHQUAKE_EVENT_MAGNITUDE = "magnitude"
-EARTHQUAKE_EVENT_DISTANCE = "distance"
-EARTHQUAKE_EVENT_YEAR = "year"
+YEAR_COLUMN = "year"
 
 # PAYOUT STRUCTURE DATA MODEL DEFINITION
 PAYOUT_RADIUS = "Radius"
@@ -45,24 +43,20 @@ def get_haversine_distance(blist_lat,blist_lon,a_lat,a_lon):
         list of float
             List of haversine distances between A and each points B, in km.
     """
-    #Initialize the list of results
-    res = []
-
     #Convert lat/lon of point A from decimal degrees to radians
-    a_lambda = math.radians(a_lon)
-    a_phi = math.radians(a_lat)
+    a_lambda = np.deg2rad(a_lon)
+    a_phi = np.deg2rad(a_lat)
 
-    for b_lat, b_lon in zip(blist_lat, blist_lon): #For each point B
-        #Convert lat/lon of point B from decimal degrees to radians
-        b_lambda = math.radians(b_lon)
-        b_phi = math.radians(b_lat)
+    #Convert lat/lon of point B from decimal degrees to radians
+    b_lambda = np.deg2rad(blist_lon)
+    b_phi = np.deg2rad(blist_lat)
 
-        #Compute haversine distance (see wikipeadia reference above)
-        res.append(2*EARTH_RADIUS*math.asin( \
-            math.sqrt( \
-                math.sin((b_phi - a_phi)/2) ** 2 + math.cos(a_phi)*math.cos(b_phi)*math.sin((b_lambda - a_lambda)/2) ** 2
-            )
-        ))
+    #Compute haversine distance (see wikipeadia reference above)
+    res = (2*EARTH_RADIUS*np.arcsin( \
+        np.sqrt( \
+            np.sin((b_phi - a_phi)/2) ** 2 + np.cos(a_phi)*np.cos(b_phi)*np.sin((b_lambda - a_lambda)/2) ** 2
+        )
+    ))
 
     return res
     
@@ -82,30 +76,18 @@ def compute_payouts(earthquake_data, payout_structure):
         dict
             key: year, value: payout applied on this year according to the payout structure (in %)
     """
-    
-    #Initialize the dict to gather results
-    res = dict()
-
-    #Iterate over each earthquake to see its impact on payout
-    for index, earthquake_item in earthquake_data.iterrows():
-        
-        #Extract data about the earthquake that is relevant for payout computation.
-        earthquake_event = {
-            EARTHQUAKE_EVENT_YEAR: datetime.datetime.strptime(earthquake_item[TIME_COLUMN], EARTHQUAKE_TIME_FORMAT).year,
-            EARTHQUAKE_EVENT_MAGNITUDE: earthquake_item[MAGNITUDE_COLUMN],
-            EARTHQUAKE_EVENT_DISTANCE: earthquake_item[DISTANCE_COLUMN]
-        }
-
-        #Compute the payout linked to this earthquake
-        payout_value = compute_payout_item(earthquake_event, payout_structure)
-
-        if payout_value > 0: #If the earthquake gives right to a payout
-            #Compare this payout to the ones on the same year. Only the highest one should be kept.
-            if earthquake_event[EARTHQUAKE_EVENT_YEAR] in res:
-                res[earthquake_event[EARTHQUAKE_EVENT_YEAR]] = max(res[earthquake_event[EARTHQUAKE_EVENT_YEAR]], payout_value)
-            else:
-                res[earthquake_event[EARTHQUAKE_EVENT_YEAR]] = payout_value
-    return res
+    #Initialize a dataframe matching each earthquake year to the eligible payout
+    df_earthquake_payouts = pd.DataFrame()
+    #For each earthquake, compute the applicable payout
+    df_earthquake_payouts[PAYOUT_COLUMN] = earthquake_data.apply(compute_payout_item,args=(payout_structure,), axis=1)
+    #For each earthquake, retrieve the year
+    df_earthquake_payouts[YEAR_COLUMN] = earthquake_data[TIME_COLUMN].apply(datetime.datetime.strptime, args=(EARTHQUAKE_TIME_FORMAT,)).dt.year
+    #For each year, get the maximum applicable payout
+    df_yearly_payout = df_earthquake_payouts.groupby(YEAR_COLUMN, as_index=False)[PAYOUT_COLUMN].max()
+    #Remove years with no payout (payout = 0) for clarity
+    df_yearly_payout.drop(df_yearly_payout[df_yearly_payout[PAYOUT_COLUMN] == 0].index, inplace = True)
+    #Format the output as a dict key/value = year/payout
+    return dict(zip(df_yearly_payout[YEAR_COLUMN], df_yearly_payout[PAYOUT_COLUMN]))
 
 
 def compute_payout_item(earthquake_event, payout_structure):
@@ -116,10 +98,7 @@ def compute_payout_item(earthquake_event, payout_structure):
 
     Parameters
     ---------- 
-        earthquake_data: dict
-            Dict containing data on the earthquake. List of mandatory keys:
-                EARTHQUAKE_EVENT_MAGNITUDE: float - Magnitude of the earthquake
-                EARTHQUAKE_EVENT_DISTANCE: float - Distance of the earthquake from the point of interest, in km.
+        earthquake_event: Row of a Dataframe with columns: 'distance', 'mag'
         payout_structure: DataFrame
             DataFrame containing the payout structure. See "compute_payout_item" doc for description List of mandatory columns:
                 PAYOUT_RADIUS: float - Radius criteria, in km.
@@ -131,16 +110,10 @@ def compute_payout_item(earthquake_event, payout_structure):
         float
             payout applied for this earthquake, in percent
     """
-    #By default, applied payout is 0.
-    res = 0
-
-    #For each set of criteria, check if the earthquake matches or not
-    for index, payout_item in payout_structure.iterrows():
-        #Radius criteria
-        if  earthquake_event[EARTHQUAKE_EVENT_DISTANCE] <= payout_item[PAYOUT_RADIUS] and \
-            earthquake_event[EARTHQUAKE_EVENT_MAGNITUDE] >= payout_item[PAYOUT_MAGNITUDE]: # Magnitude criteria
-            res = max(res, payout_item[PAYOUT_PERCENTAGE]) #If the earthquake matches several criteria set, we keep the highest payout.
-    return res
+    #For each possible payout, keep its value only if applicable, otherwise 0. Then get the maximum of remaining payouts.
+    return (1*(earthquake_event[DISTANCE_COLUMN] <= payout_structure[PAYOUT_RADIUS]) * \
+           1*(earthquake_event[MAGNITUDE_COLUMN] >= payout_structure[PAYOUT_MAGNITUDE]) * \
+           payout_structure[PAYOUT_PERCENTAGE]).max()
     
 def compute_burning_cost(payouts, start_year, end_year):
     """This function computes the burning cost over a time range from a list of payouts.
@@ -159,11 +132,16 @@ def compute_burning_cost(payouts, start_year, end_year):
         float
             burning rate in percent
     """
-    #Compute the sum of payouts per years within the time range
-    payout_sum = 0
-    for year, payout in payouts.items():
-        if start_year <= year and year <= end_year:
-            payout_sum += payout
-    #Divide by the number of years in the time range
-    res = payout_sum / (end_year - start_year + 1)
+    #Validate inputs
+    res = 0
+    valid_inputs = True
+    if end_year < start_year:
+        valid_inputs = False
+        print("compute_burning_cost - Warning: end_year must be above or equal to start_year")
+
+    if valid_inputs:
+        #Compute the sum of payouts per years within the time range
+        payout_sum = sum(payout for year, payout in payouts.items() if start_year <= year and year <= end_year)
+        #Divide by the number of years in the time range
+        res = payout_sum / (end_year - start_year + 1)
     return res
